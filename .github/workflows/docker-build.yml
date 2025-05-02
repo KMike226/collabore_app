@@ -1,0 +1,96 @@
+name: Docker Build and Test
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  docker-build:
+    name: Build and Test Docker Images
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        service: [frontend, backend]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: false
+          tags: collaborative-app-${{ matrix.service }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Docker image
+        run: |
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            docker run --rm --name test-frontend -d -p 3000:3000 collaborative-app-frontend:test
+            sleep 10
+            curl -f http://localhost:3000/health || exit 1
+            docker stop test-frontend
+          elif [ "${{ matrix.service }}" = "backend" ]; then
+            docker run --rm --name test-backend -d -p 5000:5000 \
+              -e DATABASE_URL=postgresql://user:pass@localhost:5432/test \
+              -e NODE_ENV=test \
+              collaborative-app-backend:test
+            sleep 10
+            curl -f http://localhost:5000/health || exit 1
+            docker stop test-backend
+          fi
+
+  docker-compose-test:
+    name: Test Docker Compose
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create test environment file
+        run: |
+          cat > .env << EOF
+          NODE_ENV=test
+          DATABASE_PASSWORD=test_password
+          JWT_SECRET=test_jwt_secret
+          REDIS_PASSWORD=test_redis_password
+          EOF
+
+      - name: Build and start services
+        run: |
+          docker-compose up -d --build
+          sleep 30
+
+      - name: Test services health
+        run: |
+          docker-compose ps
+          curl -f http://localhost:3000/ || exit 1
+          curl -f http://localhost:5000/health || exit 1
+
+      - name: Run integration tests
+        run: |
+          # Add integration tests here
+          echo "Integration tests would run here"
+
+      - name: Check logs
+        if: failure()
+        run: |
+          docker-compose logs frontend
+          docker-compose logs backend
+          docker-compose logs postgres
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker-compose down -v
+          docker system prune -f
